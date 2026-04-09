@@ -110,3 +110,29 @@ class InventoryClient:
         except Exception as e:
             logger.error(f"Error releasing reservation {reservation_id}: {e}")
             raise
+
+    async def release_by_order_id(self, order_id: UUID) -> Dict[str, Any]:
+        """
+        Release inventory reservation by order ID (for order cancellation).
+
+        Args:
+            order_id: Order ID
+
+        Returns:
+            Release response {message, order_id}
+
+        Raises:
+            httpx.HTTPError: If release fails
+        """
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/api/inventory/release/{order_id}"
+                )
+                response.raise_for_status()
+                result = response.json()
+                logger.info(f"Released inventory for order: {order_id}")
+                return result
+        except Exception as e:
+            logger.error(f"Error releasing inventory for order {order_id}: {e}")
+            raise
