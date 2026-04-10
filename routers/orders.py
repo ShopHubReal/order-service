@@ -104,7 +104,7 @@ async def cancel_order(
     """
     try:
         user_id = UUID(current_user["user_id"])
-        order = order_service.cancel_order(order_id, user_id)
+        order = await order_service.cancel_order(order_id, user_id)
 
         # Publish order.cancelled event
         event_publisher = EventPublisher()

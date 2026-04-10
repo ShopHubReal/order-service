@@ -7,6 +7,7 @@ import logging
 
 from models.database import Order, OrderItem
 from models.schemas import OrderResponse, OrderListResponse, ShippingAddress
+from services.payment_client import PaymentClient
 from config import config
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,7 @@ class OrderService:
 
     def __init__(self, db: Session):
         self.db = db
+        self.payment_client = PaymentClient()
 
     def create_order(
         self,
@@ -177,9 +179,9 @@ class OrderService:
 
         return order
 
-    def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
+    async def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
         """
-        Cancel an order.
+        Cancel an order and refund payment if applicable.
 
         Args:
             order_id: Order ID
@@ -198,6 +200,20 @@ class OrderService:
         # Can only cancel orders that haven't shipped yet
         if order.status in ["shipped", "delivered", "cancelled"]:
             raise ValueError(f"Cannot cancel order with status: {order.status}")
+
+        # Process refund if payment was made
+        if order.payment_id:
+            try:
+                logger.info(f"Processing refund for payment {order.payment_id}")
+                refund_result = await self.payment_client.refund_payment(
+                    payment_id=order.payment_id,
+                    reason="order_cancelled"
+                )
+                logger.info(f"Refund processed successfully: {refund_result.get('refund_id')}")
+            except Exception as e:
+                logger.error(f"Failed to process refund for payment {order.payment_id}: {e}")
+                # Continue with cancellation even if refund fails - can be handled manually
+                # This prevents order cancellation from being blocked by payment service issues
 
         order.status = "cancelled"
         self.db.commit()
