@@ -9,6 +9,8 @@ from database import get_db
 from models.schemas import OrderResponse, OrderListResponse, OrderStatusUpdate
 from services.order_service import OrderService
 from services.events import EventPublisher
+from services.payment_client import PaymentClient
+from services.inventory_client import InventoryClient
 from routers.auth import get_current_user, require_admin
 
 logger = logging.getLogger(__name__)
@@ -19,6 +21,16 @@ router = APIRouter()
 def get_order_service(db: Session = Depends(get_db)) -> OrderService:
     """Dependency to get order service."""
     return OrderService(db)
+
+
+def get_payment_client() -> PaymentClient:
+    """Dependency to get payment client."""
+    return PaymentClient()
+
+
+def get_inventory_client() -> InventoryClient:
+    """Dependency to get inventory client."""
+    return InventoryClient()
 
 
 @router.get("", response_model=List[OrderListResponse])
@@ -95,18 +107,33 @@ async def get_order(
 async def cancel_order(
     order_id: UUID,
     current_user: dict = Depends(get_current_user),
-    order_service: OrderService = Depends(get_order_service)
+    order_service: OrderService = Depends(get_order_service),
+    payment_client: PaymentClient = Depends(get_payment_client),
+    inventory_client: InventoryClient = Depends(get_inventory_client)
 ):
     """
-    Cancel an order.
+    Cancel an order with complete cancellation flow.
+
+    This endpoint implements a comprehensive cancellation process that:
+    - Refunds the customer's payment (for paid orders)
+    - Restores inventory to available stock
+    - Updates the order status to cancelled
+    - Publishes order.cancelled event for notifications
 
     Can only cancel orders that haven't shipped yet.
     """
     try:
         user_id = UUID(current_user["user_id"])
-        order = order_service.cancel_order(order_id, user_id)
 
-        # Publish order.cancelled event
+        # Execute complete cancellation flow
+        order = await order_service.cancel_order(
+            order_id=order_id,
+            user_id=user_id,
+            payment_client=payment_client,
+            inventory_client=inventory_client
+        )
+
+        # Publish order.cancelled event for notifications
         event_publisher = EventPublisher()
         await event_publisher.publish_order_cancelled(order_id)
 

@@ -72,6 +72,36 @@ class PaymentClient:
             logger.error(f"Error processing payment: {e}")
             raise
 
+    async def get_payment_by_order_id(self, order_id: UUID) -> Dict[str, Any]:
+        """
+        Get payment details by order ID.
+
+        Args:
+            order_id: Order ID
+
+        Returns:
+            Payment details {id, status, amount, order_id}
+
+        Raises:
+            httpx.HTTPError: If payment not found or request fails
+        """
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(
+                    f"{self.base_url}/api/payments/by-order/{order_id}"
+                )
+                response.raise_for_status()
+                result = response.json()
+                logger.info(f"Found payment for order {order_id}: {result.get('id')}")
+                return result
+        except httpx.HTTPStatusError as e:
+            error_detail = e.response.json().get("detail", str(e))
+            logger.error(f"Failed to find payment for order {order_id}: {error_detail}")
+            raise Exception(error_detail)
+        except Exception as e:
+            logger.error(f"Error finding payment for order {order_id}: {e}")
+            raise
+
     async def refund_payment(
         self,
         payment_id: UUID,

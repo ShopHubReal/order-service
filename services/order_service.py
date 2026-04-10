@@ -174,19 +174,33 @@ class OrderService:
 
         return order
 
-    def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
+    async def cancel_order(
+        self,
+        order_id: UUID,
+        user_id: UUID,
+        payment_client=None,
+        inventory_client=None
+    ) -> Order:
         """
-        Cancel an order.
+        Cancel an order with complete cancellation flow.
+
+        This method implements a complete cancellation process that:
+        1. Refunds the customer's payment
+        2. Restores inventory to available stock
+        3. Updates the order status to cancelled
 
         Args:
             order_id: Order ID
             user_id: User ID
+            payment_client: Payment service client (injected)
+            inventory_client: Inventory service client (injected)
 
         Returns:
             Updated order
 
         Raises:
             ValueError: If order not found or cannot be cancelled
+            Exception: If cancellation process fails
         """
         order = self.get_order(order_id, user_id)
         if not order:
@@ -196,9 +210,45 @@ class OrderService:
         if order.status in ["shipped", "delivered", "cancelled"]:
             raise ValueError(f"Cannot cancel order with status: {order.status}")
 
+        logger.info(f"Starting complete cancellation for order {order_id}")
+
+        # Step 1: Refund payment (only for paid orders)
+        if order.status == "paid" and payment_client:
+            try:
+                logger.info(f"Refunding payment for order {order_id}")
+                # Find payment by order ID
+                payment = await payment_client.get_payment_by_order_id(order_id)
+                payment_id = UUID(payment["id"])
+
+                # Process refund
+                refund = await payment_client.refund_payment(
+                    payment_id=payment_id,
+                    amount=order.total,
+                    reason="Order cancelled by customer"
+                )
+                logger.info(f"Payment refunded successfully: {refund.get('id')}")
+            except Exception as e:
+                logger.error(f"Failed to refund payment for order {order_id}: {e}")
+                # Don't fail the entire cancellation if refund fails -
+                # this can be handled manually or through retry mechanisms
+                logger.warning(f"Order {order_id} will be cancelled despite refund failure")
+
+        # Step 2: Restore inventory to available stock
+        if inventory_client:
+            try:
+                logger.info(f"Restoring inventory for order {order_id}")
+                # Release inventory back to available stock
+                result = await inventory_client.release_by_order_id(order_id)
+                logger.info(f"Inventory restored successfully for order {order_id}")
+            except Exception as e:
+                logger.error(f"Failed to restore inventory for order {order_id}: {e}")
+                # Don't fail the entire cancellation - inventory can be corrected manually
+                logger.warning(f"Order {order_id} will be cancelled despite inventory restoration failure")
+
+        # Step 3: Update order status to cancelled
         order.status = "cancelled"
         self.db.commit()
         self.db.refresh(order)
-        logger.info(f"Cancelled order {order_id}")
+        logger.info(f"Order {order_id} successfully cancelled")
 
         return order
