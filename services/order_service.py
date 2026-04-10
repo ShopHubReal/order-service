@@ -15,8 +15,17 @@ logger = logging.getLogger(__name__)
 class OrderService:
     """Service for order operations."""
 
-    def __init__(self, db: Session):
+    def __init__(
+        self,
+        db: Session,
+        payment_client=None,
+        inventory_client=None,
+        event_publisher=None
+    ):
         self.db = db
+        self.payment_client = payment_client
+        self.inventory_client = inventory_client
+        self.event_publisher = event_publisher
 
     def create_order(
         self,
@@ -174,20 +183,42 @@ class OrderService:
 
         return order
 
-    def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
+    async def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
         """
-        Cancel an order.
+        Cancel an existing order with complete orchestration.
+
+        This method implements a complete cancellation flow that:
+        1. Validates the order exists and belongs to the user
+        2. Refunds the customer's payment
+        3. Restores inventory to available stock
+        4. Notifies the customer via order.cancelled event
+        5. Updates the order status to 'cancelled'
+
+        Only orders with status 'pending', 'paid', or 'processing' can be cancelled.
+        Orders that have already been shipped, delivered, or previously cancelled
+        cannot be cancelled.
 
         Args:
-            order_id: Order ID
-            user_id: User ID
+            order_id: The unique identifier of the order to be cancelled
+            user_id: The unique identifier of the user requesting the cancellation
 
         Returns:
-            Updated order
+            Order: The updated Order model instance with status 'cancelled'
 
         Raises:
-            ValueError: If order not found or cannot be cancelled
+            ValueError: If order not found, doesn't belong to user, or cannot be cancelled
+            Exception: If refund or inventory release fails
+
+        Example:
+            >>> order_service = OrderService(db_session, payment_client, inventory_client, event_publisher)
+            >>> cancelled_order = await order_service.cancel_order(
+            ...     order_id=UUID("123e4567-e89b-12d3-a456-426614174000"),
+            ...     user_id=UUID("987fcdeb-51d2-43ef-9876-543210987654")
+            ... )
+            >>> print(cancelled_order.status)
+            'cancelled'
         """
+        # Step 1: Validate order
         order = self.get_order(order_id, user_id)
         if not order:
             raise ValueError(f"Order {order_id} not found")
@@ -196,9 +227,47 @@ class OrderService:
         if order.status in ["shipped", "delivered", "cancelled"]:
             raise ValueError(f"Cannot cancel order with status: {order.status}")
 
+        logger.info(f"Starting cancellation for order {order_id}")
+
+        # Step 2: Refund payment
+        if self.payment_client and order.status in ["paid", "processing"]:
+            try:
+                logger.info(f"Refunding payment for order {order_id}")
+                await self.payment_client.refund_by_order_id(
+                    order_id=order_id,
+                    reason="Order cancelled by customer"
+                )
+                logger.info(f"Payment refunded successfully for order {order_id}")
+            except Exception as e:
+                logger.error(f"Payment refund failed for order {order_id}: {e}")
+                raise Exception(f"Failed to refund payment: {str(e)}")
+
+        # Step 3: Release inventory
+        if self.inventory_client:
+            try:
+                logger.info(f"Releasing inventory for order {order_id}")
+                await self.inventory_client.release_by_order_id(order_id)
+                logger.info(f"Inventory released successfully for order {order_id}")
+            except Exception as e:
+                logger.error(f"Inventory release failed for order {order_id}: {e}")
+                # Log but don't fail - payment already refunded
+                # This should be handled by eventual consistency mechanisms
+
+        # Step 4: Update order status
         order.status = "cancelled"
         self.db.commit()
         self.db.refresh(order)
-        logger.info(f"Cancelled order {order_id}")
+        logger.info(f"Order {order_id} status updated to cancelled")
 
+        # Step 5: Publish order.cancelled event to notify customer
+        if self.event_publisher:
+            try:
+                logger.info(f"Publishing order.cancelled event for order {order_id}")
+                await self.event_publisher.publish_order_cancelled(order_id)
+                logger.info(f"Order cancellation event published for order {order_id}")
+            except Exception as e:
+                logger.error(f"Failed to publish order.cancelled event for order {order_id}: {e}")
+                # Event publishing is non-critical, order is already cancelled
+
+        logger.info(f"Successfully cancelled order {order_id}")
         return order

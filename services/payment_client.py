@@ -116,3 +116,46 @@ class PaymentClient:
         except Exception as e:
             logger.error(f"Error processing refund: {e}")
             raise
+
+    async def refund_by_order_id(
+        self,
+        order_id: UUID,
+        amount: Optional[Decimal] = None,
+        reason: str = "Order cancelled"
+    ) -> Dict[str, Any]:
+        """
+        Refund a payment by order ID (for order cancellation).
+
+        Args:
+            order_id: Order ID
+            amount: Optional partial refund amount (None = full refund)
+            reason: Refund reason
+
+        Returns:
+            Refund details {id, status, refunded_amount}
+
+        Raises:
+            httpx.HTTPError: If refund fails
+        """
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                payload = {"reason": reason}
+                if amount is not None:
+                    payload["amount"] = str(amount)
+
+                response = await client.post(
+                    f"{self.base_url}/api/payments/by-order/{order_id}/refund",
+                    json=payload
+                )
+                response.raise_for_status()
+                result = response.json()
+
+                logger.info(f"Refund successful for order {order_id}: {result.get('id')}")
+                return result
+        except httpx.HTTPStatusError as e:
+            error_detail = e.response.json().get("detail", str(e))
+            logger.error(f"Refund failed for order {order_id}: {error_detail}")
+            raise Exception(error_detail)
+        except Exception as e:
+            logger.error(f"Error processing refund for order {order_id}: {e}")
+            raise

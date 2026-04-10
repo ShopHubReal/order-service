@@ -9,6 +9,8 @@ from database import get_db
 from models.schemas import OrderResponse, OrderListResponse, OrderStatusUpdate
 from services.order_service import OrderService
 from services.events import EventPublisher
+from services.payment_client import PaymentClient
+from services.inventory_client import InventoryClient
 from routers.auth import get_current_user, require_admin
 
 logger = logging.getLogger(__name__)
@@ -17,8 +19,11 @@ router = APIRouter()
 
 
 def get_order_service(db: Session = Depends(get_db)) -> OrderService:
-    """Dependency to get order service."""
-    return OrderService(db)
+    """Dependency to get order service with all required clients."""
+    payment_client = PaymentClient()
+    inventory_client = InventoryClient()
+    event_publisher = EventPublisher()
+    return OrderService(db, payment_client, inventory_client, event_publisher)
 
 
 @router.get("", response_model=List[OrderListResponse])
@@ -98,18 +103,19 @@ async def cancel_order(
     order_service: OrderService = Depends(get_order_service)
 ):
     """
-    Cancel an order.
+    Cancel an order with complete orchestration.
+
+    Performs:
+    - Refunds the customer's payment
+    - Restores inventory to available stock
+    - Notifies the customer via order.cancelled event
+    - Updates order status to 'cancelled'
 
     Can only cancel orders that haven't shipped yet.
     """
     try:
         user_id = UUID(current_user["user_id"])
-        order = order_service.cancel_order(order_id, user_id)
-
-        # Publish order.cancelled event
-        event_publisher = EventPublisher()
-        await event_publisher.publish_order_cancelled(order_id)
-
+        order = await order_service.cancel_order(order_id, user_id)
         return OrderResponse.model_validate(order)
     except ValueError as e:
         raise HTTPException(
