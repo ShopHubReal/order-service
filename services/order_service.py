@@ -8,6 +8,7 @@ import logging
 from models.database import Order, OrderItem
 from models.schemas import OrderResponse, OrderListResponse, ShippingAddress
 from config import config
+from services.payment_client import PaymentClient
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,7 @@ class OrderService:
 
     def __init__(self, db: Session):
         self.db = db
+        self.payment_client = PaymentClient()
 
     def create_order(
         self,
@@ -177,9 +179,9 @@ class OrderService:
 
         return order
 
-    def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
+    async def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
         """
-        Cancel an order.
+        Cancel an order and process refund if payment was made.
 
         Args:
             order_id: Order ID
@@ -190,6 +192,7 @@ class OrderService:
 
         Raises:
             ValueError: If order not found or cannot be cancelled
+            Exception: If refund fails
         """
         order = self.get_order(order_id, user_id)
         if not order:
@@ -199,6 +202,23 @@ class OrderService:
         if order.status in ["shipped", "delivered", "cancelled"]:
             raise ValueError(f"Cannot cancel order with status: {order.status}")
 
+        # Process refund if payment was made
+        if order.payment_id:
+            try:
+                logger.info(f"Processing refund for order {order_id}, payment {order.payment_id}")
+                refund_result = await self.payment_client.refund_payment(
+                    payment_id=order.payment_id,
+                    amount=order.total,
+                    reason="order_cancellation"
+                )
+                logger.info(f"Refund processed successfully: {refund_result.get('id')}")
+            except Exception as e:
+                logger.error(f"Failed to process refund for order {order_id}: {e}")
+                raise Exception(f"Order cancellation failed: Unable to process refund - {str(e)}")
+        else:
+            logger.info(f"No payment to refund for order {order_id}")
+
+        # Update order status only after successful refund (or no payment to refund)
         order.status = "cancelled"
         self.db.commit()
         self.db.refresh(order)
