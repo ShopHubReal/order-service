@@ -4,6 +4,7 @@ from typing import List, Optional
 from uuid import UUID
 from decimal import Decimal
 import logging
+import httpx
 
 from models.database import Order, OrderItem
 from models.schemas import OrderResponse, OrderListResponse, ShippingAddress
@@ -177,9 +178,9 @@ class OrderService:
 
         return order
 
-    def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
+    async def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
         """
-        Cancel an order.
+        Cancel an order and refund payment.
 
         Args:
             order_id: Order ID
@@ -190,6 +191,7 @@ class OrderService:
 
         Raises:
             ValueError: If order not found or cannot be cancelled
+            Exception: If payment refund fails
         """
         order = self.get_order(order_id, user_id)
         if not order:
@@ -199,9 +201,53 @@ class OrderService:
         if order.status in ["shipped", "delivered", "cancelled"]:
             raise ValueError(f"Cannot cancel order with status: {order.status}")
 
-        order.status = "cancelled"
-        self.db.commit()
-        self.db.refresh(order)
-        logger.info(f"Cancelled order {order_id}")
+        # Process payment refund if payment exists
+        refund_successful = False
+        if order.payment_id:
+            try:
+                async with httpx.AsyncClient() as client:
+                    refund_request = {
+                        "transaction_ref": str(order.payment_id),
+                        "reversal_notes": f"Order cancellation for order {order_id}"
+                    }
+
+                    response = await client.post(
+                        f"{config.PAYMENT_SERVICE_URL}/payment-ops/reverse-transaction",
+                        json=refund_request,
+                        timeout=30.0
+                    )
+
+                    if response.status_code == 200:
+                        refund_data = response.json()
+                        refund_successful = True
+                        logger.info(
+                            f"Payment refund successful for order {order_id}, "
+                            f"refund ID: {refund_data.get('id')}"
+                        )
+                    else:
+                        logger.error(
+                            f"Payment refund failed for order {order_id}: "
+                            f"HTTP {response.status_code} - {response.text}"
+                        )
+                        raise Exception(f"Payment refund failed: {response.text}")
+
+            except httpx.RequestError as e:
+                logger.error(f"Payment service request failed for order {order_id}: {e}")
+                raise Exception(f"Payment service unavailable: {e}")
+            except Exception as e:
+                logger.error(f"Unexpected error during refund for order {order_id}: {e}")
+                raise Exception(f"Payment refund failed: {e}")
+        else:
+            logger.info(f"No payment to refund for order {order_id}")
+            refund_successful = True
+
+        # Only update order status if refund was successful or no payment exists
+        if refund_successful:
+            order.status = "cancelled"
+            self.db.commit()
+            self.db.refresh(order)
+            logger.info(f"Cancelled order {order_id}")
+        else:
+            raise Exception("Cannot cancel order: payment refund failed")
 
         return order
