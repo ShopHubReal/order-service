@@ -1,6 +1,6 @@
 """Payment service HTTP client."""
 import httpx
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from uuid import UUID
 from decimal import Decimal
 import logging
@@ -72,47 +72,3 @@ class PaymentClient:
             logger.error(f"Error processing payment: {e}")
             raise
 
-    async def refund_payment(
-        self,
-        payment_id: UUID,
-        amount: Optional[Decimal] = None,
-        reason: str = "Order cancelled"
-    ) -> Dict[str, Any]:
-        """
-        Refund a payment via payment service.
-
-        Args:
-            payment_id: Payment ID to refund
-            amount: Optional partial refund amount (None = full refund)
-            reason: Refund reason
-
-        Returns:
-            Refund details {id, status, refunded_amount}
-
-        Raises:
-            httpx.HTTPError: If refund fails
-        """
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                payload = {
-                    "reason": reason
-                }
-                if amount is not None:
-                    payload["amount"] = str(amount)
-
-                response = await client.post(
-                    f"{self.base_url}/api/payments/{payment_id}/refund",
-                    json=payload
-                )
-                response.raise_for_status()
-                result = response.json()
-
-                logger.info(f"Refund successful: {result.get('id')}")
-                return result
-        except httpx.HTTPStatusError as e:
-            error_detail = e.response.json().get("detail", str(e))
-            logger.error(f"Refund failed: {error_detail}")
-            raise Exception(error_detail)
-        except Exception as e:
-            logger.error(f"Error processing refund: {e}")
-            raise
