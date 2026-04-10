@@ -15,6 +15,7 @@ class Order(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    payment_id = Column(UUID(as_uuid=True), nullable=True)  # Payment service payment ID
     status = Column(
         String(20),
         default="pending",

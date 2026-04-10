@@ -159,7 +159,8 @@ class CheckoutService:
             order = self.order_service.create_order(
                 user_id=user_id,
                 items=order_items,
-                shipping_address=checkout_request.shipping_address
+                shipping_address=checkout_request.shipping_address,
+                payment_id=UUID(payment['id'])  # Store payment ID for refunds
             )
 
             # Update order status to paid

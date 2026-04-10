@@ -22,7 +22,8 @@ class OrderService:
         self,
         user_id: UUID,
         items: List[dict],
-        shipping_address: ShippingAddress
+        shipping_address: ShippingAddress,
+        payment_id: UUID = None
     ) -> Order:
         """
         Create a new order.
@@ -31,6 +32,7 @@ class OrderService:
             user_id: User ID
             items: List of items [{product_id, variant_id, quantity, unit_price}]
             shipping_address: Shipping address
+            payment_id: Optional payment ID from payment service
 
         Returns:
             Created order
@@ -53,6 +55,7 @@ class OrderService:
         # Create order
         order = Order(
             user_id=user_id,
+            payment_id=payment_id,
             status="pending",
             subtotal=subtotal,
             tax=tax,
