@@ -177,7 +177,7 @@ class OrderService:
 
         return order
 
-    def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
+    async def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
         """
         Cancel an order.
 
