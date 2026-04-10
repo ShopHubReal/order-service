@@ -7,6 +7,7 @@ import logging
 
 from models.database import Order, OrderItem
 from models.schemas import OrderResponse, OrderListResponse, ShippingAddress
+from services.payment_client import PaymentClient
 from config import config
 
 logger = logging.getLogger(__name__)
@@ -177,9 +178,9 @@ class OrderService:
 
         return order
 
-    def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
+    async def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
         """
-        Cancel an order.
+        Cancel an order and process refund if payment was made.
 
         Args:
             order_id: Order ID
@@ -190,6 +191,7 @@ class OrderService:
 
         Raises:
             ValueError: If order not found or cannot be cancelled
+            Exception: If refund processing fails
         """
         order = self.get_order(order_id, user_id)
         if not order:
@@ -199,6 +201,23 @@ class OrderService:
         if order.status in ["shipped", "delivered", "cancelled"]:
             raise ValueError(f"Cannot cancel order with status: {order.status}")
 
+        # Process refund if payment was made
+        if order.payment_id:
+            try:
+                payment_client = PaymentClient()
+                refund_result = await payment_client.refund_payment(
+                    payment_id=order.payment_id,
+                    amount=order.total,
+                    reason=f"Order cancellation - Order ID: {order_id}"
+                )
+                logger.info(f"Refund processed for order {order_id}: {refund_result.get('id')}")
+            except Exception as e:
+                logger.error(f"Failed to process refund for order {order_id}: {e}")
+                # You might want to set order status to "refund_pending" instead of failing completely
+                # For now, we'll raise the exception, but in production you might want different handling
+                raise Exception(f"Order cancellation failed due to refund error: {e}")
+
+        # Update order status
         order.status = "cancelled"
         self.db.commit()
         self.db.refresh(order)
