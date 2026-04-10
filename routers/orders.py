@@ -104,7 +104,7 @@ async def cancel_order(
     """
     try:
         user_id = UUID(current_user["user_id"])
-        order = order_service.cancel_order(order_id, user_id)
+        order = await order_service.cancel_order(order_id, user_id)
 
         # Publish order.cancelled event
         event_publisher = EventPublisher()
@@ -114,6 +114,13 @@ async def cancel_order(
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except RuntimeError as e:
+        # Handle payment refund failures
+        logger.error(f"Payment refund failed for order {order_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(e)
         )
     except Exception as e:
