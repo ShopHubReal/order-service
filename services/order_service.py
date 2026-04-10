@@ -4,10 +4,12 @@ from typing import List, Optional
 from uuid import UUID
 from decimal import Decimal
 import logging
+import asyncio
 
 from models.database import Order, OrderItem
 from models.schemas import OrderResponse, OrderListResponse, ShippingAddress
 from config import config
+from services.payment_client import PaymentClient
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +19,7 @@ class OrderService:
 
     def __init__(self, db: Session):
         self.db = db
+        self.payment_client = PaymentClient()
 
     def create_order(
         self,
@@ -177,9 +180,9 @@ class OrderService:
 
         return order
 
-    def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
+    async def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
         """
-        Cancel an order.
+        Cancel an order and process payment refund.
 
         Args:
             order_id: Order ID
@@ -190,6 +193,7 @@ class OrderService:
 
         Raises:
             ValueError: If order not found or cannot be cancelled
+            Exception: If refund processing fails
         """
         order = self.get_order(order_id, user_id)
         if not order:
@@ -199,9 +203,25 @@ class OrderService:
         if order.status in ["shipped", "delivered", "cancelled"]:
             raise ValueError(f"Cannot cancel order with status: {order.status}")
 
+        # Process payment refund if order has a payment
+        refund_result = None
+        if order.payment_id:
+            try:
+                refund_result = await self.payment_client.refund_payment(
+                    payment_id=order.payment_id,
+                    amount=order.total,
+                    reason="order_cancellation"
+                )
+                logger.info(f"Successfully processed refund for order {order_id}: {refund_result.get('id')}")
+            except Exception as e:
+                logger.error(f"Failed to process refund for order {order_id}: {e}")
+                # Don't cancel the order if refund fails - let the admin handle it
+                raise Exception(f"Failed to process payment refund: {e}")
+
+        # Update order status to cancelled
         order.status = "cancelled"
         self.db.commit()
         self.db.refresh(order)
-        logger.info(f"Cancelled order {order_id}")
 
+        logger.info(f"Cancelled order {order_id} with refund: {refund_result.get('id') if refund_result else 'N/A'}")
         return order
