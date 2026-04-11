@@ -4,6 +4,7 @@ from typing import List, Optional
 from uuid import UUID
 from decimal import Decimal
 import logging
+import httpx
 
 from models.database import Order, OrderItem
 from models.schemas import OrderResponse, OrderListResponse, ShippingAddress
@@ -179,7 +180,7 @@ class OrderService:
 
     async def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
         """
-        Cancel an order.
+        Cancel an order and refund payment.
 
         Args:
             order_id: Order ID
@@ -190,6 +191,7 @@ class OrderService:
 
         Raises:
             ValueError: If order not found or cannot be cancelled
+            httpx.HTTPError: If payment refund request fails
         """
         order = self.get_order(order_id, user_id)
         if not order:
@@ -199,9 +201,44 @@ class OrderService:
         if order.status in ["shipped", "delivered", "cancelled"]:
             raise ValueError(f"Cannot cancel order with status: {order.status}")
 
+        # Process payment refund if payment exists
+        if order.payment_id:
+            logger.info(f"Processing refund for order {order_id}, payment_id: {order.payment_id}")
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(
+                        f"{config.PAYMENT_SERVICE_URL}/api/payments/{order.payment_id}/refund",
+                        json={
+                            "order_id": str(order_id),
+                            "amount": float(order.total),
+                            "reason": "Order cancellation"
+                        }
+                    )
+                    response.raise_for_status()
+                    refund_data = response.json()
+                    logger.info(f"Payment refund successful for order {order_id}: {refund_data}")
+            except httpx.HTTPStatusError as e:
+                logger.error(f"Payment refund failed for order {order_id}: {e}")
+                if e.response.status_code == 404:
+                    # Payment not found - proceed with cancellation but warn
+                    logger.warning(f"Payment {order.payment_id} not found, proceeding with order cancellation")
+                elif e.response.status_code in [400, 409]:
+                    # Bad request or conflict (e.g., already refunded)
+                    refund_error = e.response.json() if e.response.headers.get("content-type", "").startswith("application/json") else {"error": "Unknown error"}
+                    raise ValueError(f"Cannot refund payment: {refund_error.get('error', 'Unknown error')}")
+                else:
+                    # Other HTTP errors - fail the cancellation
+                    raise ValueError(f"Payment service error during refund: HTTP {e.response.status_code}")
+            except Exception as e:
+                logger.error(f"Unexpected error during payment refund for order {order_id}: {e}")
+                raise ValueError(f"Failed to process payment refund: {str(e)}")
+        else:
+            logger.info(f"No payment ID found for order {order_id}, skipping refund")
+
+        # Update order status to cancelled
         order.status = "cancelled"
         self.db.commit()
         self.db.refresh(order)
-        logger.info(f"Cancelled order {order_id}")
+        logger.info(f"Successfully cancelled order {order_id}")
 
         return order
