@@ -4,6 +4,7 @@ from typing import List, Optional
 from uuid import UUID
 from decimal import Decimal
 import logging
+import httpx
 
 from models.database import Order, OrderItem
 from models.schemas import OrderResponse, OrderListResponse, ShippingAddress
@@ -179,7 +180,7 @@ class OrderService:
 
     async def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
         """
-        Cancel an order.
+        Cancel an order and refund payment.
 
         Args:
             order_id: Order ID
@@ -190,6 +191,7 @@ class OrderService:
 
         Raises:
             ValueError: If order not found or cannot be cancelled
+            RuntimeError: If payment refund fails
         """
         order = self.get_order(order_id, user_id)
         if not order:
@@ -199,6 +201,37 @@ class OrderService:
         if order.status in ["shipped", "delivered", "cancelled"]:
             raise ValueError(f"Cannot cancel order with status: {order.status}")
 
+        # Process refund if payment exists
+        if order.payment_id:
+            try:
+                async with httpx.AsyncClient() as client:
+                    refund_response = await client.post(
+                        f"{config.PAYMENT_SERVICE_URL}/refunds",
+                        json={
+                            "payment_id": str(order.payment_id),
+                            "amount": float(order.total),
+                            "reason": "order_cancellation"
+                        },
+                        headers={"Content-Type": "application/json"},
+                        timeout=30.0
+                    )
+
+                    if refund_response.status_code != 200:
+                        error_msg = f"Payment refund failed for order {order_id}: {refund_response.status_code}"
+                        logger.error(f"{error_msg} - {refund_response.text}")
+                        raise RuntimeError(error_msg)
+
+                    refund_data = refund_response.json()
+                    logger.info(f"Payment refund processed for order {order_id}: {refund_data.get('refund_id')}")
+
+            except httpx.RequestError as e:
+                error_msg = f"Failed to connect to payment service for refund: {str(e)}"
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+        else:
+            logger.info(f"No payment ID found for order {order_id}, skipping refund")
+
+        # Update order status after successful refund
         order.status = "cancelled"
         self.db.commit()
         self.db.refresh(order)
