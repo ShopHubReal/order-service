@@ -4,6 +4,7 @@ from typing import List, Optional
 from uuid import UUID
 from decimal import Decimal
 import logging
+import httpx
 
 from models.database import Order, OrderItem
 from models.schemas import OrderResponse, OrderListResponse, ShippingAddress
@@ -198,6 +199,29 @@ class OrderService:
         # Can only cancel orders that haven't shipped yet
         if order.status in ["shipped", "delivered", "cancelled"]:
             raise ValueError(f"Cannot cancel order with status: {order.status}")
+
+        # Process refund if payment was made
+        if order.payment_id:
+            try:
+                async with httpx.AsyncClient() as client:
+                    refund_response = await client.post(
+                        f"{config.PAYMENT_SERVICE_URL}/api/payments/{order.payment_id}/refund",
+                        json={
+                            "order_id": str(order.id),
+                            "amount": float(order.total),
+                            "reason": "Order cancellation"
+                        },
+                        timeout=30.0
+                    )
+                    refund_response.raise_for_status()
+                    logger.info(f"Successfully refunded payment {order.payment_id} for order {order_id}")
+            except httpx.HTTPError as e:
+                logger.error(f"Failed to refund payment {order.payment_id} for order {order_id}: {e}")
+                # Continue with order cancellation even if refund fails - this can be handled manually
+                # In a production system, you might want to add the order to a retry queue
+            except Exception as e:
+                logger.error(f"Unexpected error during refund for order {order_id}: {e}")
+                # Continue with order cancellation
 
         order.status = "cancelled"
         self.db.commit()
