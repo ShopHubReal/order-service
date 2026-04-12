@@ -98,9 +98,10 @@ async def cancel_order(
     order_service: OrderService = Depends(get_order_service)
 ):
     """
-    Cancel an order.
+    Cancel an order and process payment refund.
 
     Can only cancel orders that haven't shipped yet.
+    If the order has a payment, it will be automatically refunded.
     """
     try:
         user_id = UUID(current_user["user_id"])
