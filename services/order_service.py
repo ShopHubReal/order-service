@@ -8,6 +8,7 @@ import logging
 from models.database import Order, OrderItem
 from models.schemas import OrderResponse, OrderListResponse, ShippingAddress
 from config import config
+from services.payment_client import PaymentClient
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +180,7 @@ class OrderService:
 
     async def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
         """
-        Cancel an order.
+        Cancel an order and refund the payment.
 
         Args:
             order_id: Order ID
@@ -198,6 +199,16 @@ class OrderService:
         # Can only cancel orders that haven't shipped yet
         if order.status in ["shipped", "delivered", "cancelled"]:
             raise ValueError(f"Cannot cancel order with status: {order.status}")
+
+        # Refund the payment if one exists
+        if order.payment_id:
+            try:
+                payment_client = PaymentClient()
+                await payment_client.refund_payment(order.payment_id)
+                logger.info(f"Refunded payment {order.payment_id} for order {order_id}")
+            except Exception as e:
+                logger.error(f"Failed to refund payment for order {order_id}: {e}")
+                raise
 
         order.status = "cancelled"
         self.db.commit()
