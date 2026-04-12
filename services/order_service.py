@@ -4,6 +4,7 @@ from typing import List, Optional
 from uuid import UUID
 from decimal import Decimal
 import logging
+import httpx
 
 from models.database import Order, OrderItem
 from models.schemas import OrderResponse, OrderListResponse, ShippingAddress
@@ -198,6 +199,24 @@ class OrderService:
         # Can only cancel orders that haven't shipped yet
         if order.status in ["shipped", "delivered", "cancelled"]:
             raise ValueError(f"Cannot cancel order with status: {order.status}")
+
+        # Refund payment if payment_id exists
+        if order.payment_id:
+            try:
+                async with httpx.AsyncClient() as client:
+                    refund_response = await client.post(
+                        f"{config.PAYMENT_SERVICE_URL}/payment-ops/reverse-transaction",
+                        json={
+                            "transaction_ref": str(order.payment_id),
+                            "reversal_notes": f"Order {order_id} cancelled by user {user_id}"
+                        },
+                        timeout=30.0
+                    )
+                    refund_response.raise_for_status()
+                    logger.info(f"Refund processed for order {order_id}, payment {order.payment_id}")
+            except httpx.HTTPError as e:
+                logger.error(f"Failed to refund payment {order.payment_id} for order {order_id}: {e}")
+                raise ValueError(f"Failed to process refund: {str(e)}")
 
         order.status = "cancelled"
         self.db.commit()
