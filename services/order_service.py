@@ -4,6 +4,7 @@ from typing import List, Optional
 from uuid import UUID
 from decimal import Decimal
 import logging
+import httpx
 
 from models.database import Order, OrderItem
 from models.schemas import OrderResponse, OrderListResponse, ShippingAddress
@@ -179,7 +180,7 @@ class OrderService:
 
     async def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
         """
-        Cancel an order.
+        Cancel an order and refund payment if applicable.
 
         Args:
             order_id: Order ID
@@ -190,6 +191,7 @@ class OrderService:
 
         Raises:
             ValueError: If order not found or cannot be cancelled
+            Exception: If payment refund fails
         """
         order = self.get_order(order_id, user_id)
         if not order:
@@ -199,9 +201,52 @@ class OrderService:
         if order.status in ["shipped", "delivered", "cancelled"]:
             raise ValueError(f"Cannot cancel order with status: {order.status}")
 
+        # Process payment refund if payment was made
+        if order.payment_id:
+            try:
+                await self._refund_payment(order.payment_id, order.total)
+                logger.info(f"Refunded payment {order.payment_id} for order {order_id}")
+            except Exception as e:
+                logger.error(f"Payment refund failed for order {order_id}: {e}")
+                # Re-raise the exception to prevent order cancellation if refund fails
+                raise Exception(f"Failed to process refund: {e}")
+
+        # Update order status
         order.status = "cancelled"
         self.db.commit()
         self.db.refresh(order)
         logger.info(f"Cancelled order {order_id}")
 
         return order
+
+    async def _refund_payment(self, payment_id: UUID, amount: float) -> None:
+        """
+        Refund payment through payment service.
+
+        Args:
+            payment_id: Payment ID from payment service
+            amount: Amount to refund
+
+        Raises:
+            Exception: If refund request fails
+        """
+        timeout = 15.0
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    f"{config.PAYMENT_SERVICE_URL}/api/payments/{payment_id}/refund",
+                    json={
+                        "amount": float(amount),
+                        "reason": "Order cancellation"
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+                logger.info(f"Payment refund successful: {result.get('refund_id')}")
+        except httpx.HTTPStatusError as e:
+            error_detail = e.response.json().get("detail", str(e)) if e.response else str(e)
+            logger.error(f"Payment refund failed: {error_detail}")
+            raise Exception(f"Payment refund failed: {error_detail}")
+        except Exception as e:
+            logger.error(f"Error processing payment refund: {e}")
+            raise
