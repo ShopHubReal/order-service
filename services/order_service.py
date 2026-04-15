@@ -4,6 +4,7 @@ from typing import List, Optional
 from uuid import UUID
 from decimal import Decimal
 import logging
+import httpx
 
 from models.database import Order, OrderItem
 from models.schemas import OrderResponse, OrderListResponse, ShippingAddress
@@ -179,7 +180,7 @@ class OrderService:
 
     async def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
         """
-        Cancel an order.
+        Cancel an order and refund payment.
 
         Args:
             order_id: Order ID
@@ -199,9 +200,39 @@ class OrderService:
         if order.status in ["shipped", "delivered", "cancelled"]:
             raise ValueError(f"Cannot cancel order with status: {order.status}")
 
+        # Refund payment if payment_id exists
+        refund_success = False
+        if order.payment_id:
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        f"{config.PAYMENT_SERVICE_URL}/api/v1/payments/{order.payment_id}/refund",
+                        json={
+                            "amount": float(order.total),
+                            "currency": order.currency,
+                            "reason": "Order cancellation"
+                        },
+                        timeout=10.0
+                    )
+                    response.raise_for_status()
+                    refund_success = True
+                    logger.info(f"Successfully refunded payment {order.payment_id} for order {order_id}")
+            except httpx.HTTPError as e:
+                logger.error(f"Failed to refund payment {order.payment_id} for order {order_id}: {e}")
+                # Don't prevent cancellation due to refund failure - log error and continue
+            except Exception as e:
+                logger.error(f"Unexpected error during refund for order {order_id}: {e}")
+        else:
+            logger.info(f"No payment_id found for order {order_id}, skipping refund")
+
+        # Update order status to cancelled
         order.status = "cancelled"
         self.db.commit()
         self.db.refresh(order)
-        logger.info(f"Cancelled order {order_id}")
+
+        if refund_success:
+            logger.info(f"Cancelled order {order_id} and processed refund")
+        else:
+            logger.info(f"Cancelled order {order_id} (refund failed or not required)")
 
         return order
