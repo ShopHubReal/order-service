@@ -4,6 +4,7 @@ from typing import List, Optional
 from uuid import UUID
 from decimal import Decimal
 import logging
+import httpx
 
 from models.database import Order, OrderItem
 from models.schemas import OrderResponse, OrderListResponse, ShippingAddress
@@ -179,7 +180,7 @@ class OrderService:
 
     async def cancel_order(self, order_id: UUID, user_id: UUID) -> Order:
         """
-        Cancel an order.
+        Cancel an order and refund payment.
 
         Args:
             order_id: Order ID
@@ -198,6 +199,34 @@ class OrderService:
         # Can only cancel orders that haven't shipped yet
         if order.status in ["shipped", "delivered", "cancelled"]:
             raise ValueError(f"Cannot cancel order with status: {order.status}")
+
+        # Refund payment if payment_id exists
+        if order.payment_id:
+            try:
+                async with httpx.AsyncClient() as client:
+                    refund_url = f"{config.PAYMENT_SERVICE_URL}/api/v1/payments/{order.payment_id}/refund"
+                    response = await client.post(
+                        refund_url,
+                        json={
+                            "amount": float(order.total),
+                            "currency": order.currency,
+                            "reason": "order_cancellation"
+                        },
+                        timeout=30.0
+                    )
+
+                    if response.status_code == 200:
+                        logger.info(f"Successfully refunded payment {order.payment_id} for order {order_id}")
+                    else:
+                        logger.error(
+                            f"Failed to refund payment {order.payment_id} for order {order_id}. "
+                            f"Status: {response.status_code}, Response: {response.text}"
+                        )
+            except Exception as e:
+                logger.error(f"Error refunding payment {order.payment_id} for order {order_id}: {str(e)}")
+                # Continue with order cancellation even if refund fails
+        else:
+            logger.info(f"No payment_id found for order {order_id}, skipping refund")
 
         order.status = "cancelled"
         self.db.commit()
